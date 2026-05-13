@@ -581,3 +581,52 @@ impl From<RumaUnreadNotificationsCount> for UnreadNotificationsCount {
         }
     }
 }
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    use std::time::Duration;
+
+    use matrix_sdk::test_utils::mocks::MatrixMockServer;
+    use tempfile::tempdir;
+
+    use crate::sync_service::SyncServiceBuilder;
+
+    /// Dropping an FFI [`RoomListService`] on a non-tokio thread must not panic.
+    ///
+    /// Regression test for `RoomListService.inner` being wrapped in
+    /// [`AsyncRuntimeDropped`]. Same cascade as Client / Room / SyncService:
+    /// the `matrix_sdk_ui::RoomListService` holds an `Arc<ClientInner>`
+    /// transitively, and on the last drop the sqlite Drop chain calls
+    /// `tokio::task::spawn_blocking` outside a runtime → SIGABRT.
+    ///
+    /// Empirically observed on iOS (2026-05-13) where Hermes GC finalised
+    /// the JS-side `RoomListService` as the last `Arc<ClientInner>` holder.
+    #[tokio::test]
+    async fn room_list_service_drop_on_non_tokio_thread_does_not_panic() {
+        let server = MatrixMockServer::new().await;
+        let dir = tempdir().unwrap();
+
+        // MatrixMockServer's client_builder yields an authenticated client,
+        // required for `SyncServiceBuilder::finish` (sliding sync).
+        let sdk_client = server
+            .client_builder()
+            .on_builder(|b| b.sqlite_store(dir.path(), None))
+            .build()
+            .await;
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let sync_service =
+            SyncServiceBuilder::new(sdk_client.clone(), None).finish().await.unwrap();
+        let room_list_service = sync_service.room_list_service();
+
+        // Drop all other holders so `room_list_service` is the sole
+        // `Arc<ClientInner>` holder when the worker thread drops it.
+        drop(sdk_client);
+        drop(sync_service);
+
+        std::thread::spawn(move || drop(room_list_service))
+            .join()
+            .expect("RoomListService::drop panicked on a non-tokio thread");
+    }
+}

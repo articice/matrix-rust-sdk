@@ -158,3 +158,56 @@ impl SyncServiceBuilder {
         }))
     }
 }
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    use std::time::Duration;
+
+    use matrix_sdk::test_utils::mocks::MatrixMockServer;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    /// Dropping an FFI [`SyncService`] on a non-tokio thread must not panic.
+    ///
+    /// Regression test for `SyncService.inner` being wrapped in
+    /// [`AsyncRuntimeDropped`]: `matrix_sdk_ui::sync_service::SyncService`
+    /// transitively holds an `Arc<ClientInner>` whose Drop cascade
+    /// (→ `SqliteStateStore` → deadpool `Pool` →
+    /// `SyncWrapper<rusqlite::Connection>::drop`) calls
+    /// `tokio::task::spawn_blocking`. Without a tokio runtime context that
+    /// panics inside `Drop`, which Rust turns into SIGABRT.
+    ///
+    /// This test would SIGABRT if the wrapper were removed.
+    #[tokio::test]
+    async fn sync_service_drop_on_non_tokio_thread_does_not_panic() {
+        let server = MatrixMockServer::new().await;
+        let dir = tempdir().unwrap();
+
+        // MatrixMockServer's client_builder yields an authenticated client,
+        // required for `SyncServiceBuilder::finish` (sliding sync).
+        let sdk_client = server
+            .client_builder()
+            .on_builder(|b| b.sqlite_store(dir.path(), None))
+            .build()
+            .await;
+
+        // Allow background init tasks to complete; after this `sdk_client` is
+        // the only strong reference to `ClientInner`.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let sync_service =
+            SyncServiceBuilder::new(sdk_client.clone(), None).finish().await.unwrap();
+
+        // Dropping `sdk_client` leaves `sync_service` as the sole holder of
+        // `Arc<ClientInner>`, mirroring the Hermes-finalises-last-JS-reference
+        // case observed in React Native consumers.
+        drop(sdk_client);
+
+        // Simulate Hermes GC on the JS thread (a non-tokio thread).
+        // Without `AsyncRuntimeDropped` wrapping `SyncService.inner` this SIGABRTs.
+        std::thread::spawn(move || drop(sync_service))
+            .join()
+            .expect("SyncService::drop panicked on a non-tokio thread");
+    }
+}

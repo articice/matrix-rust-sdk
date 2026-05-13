@@ -1647,3 +1647,65 @@ mod galleries {
         }
     }
 }
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    use std::time::Duration;
+
+    use matrix_sdk::{ruma::room_id, test_utils::mocks::MatrixMockServer};
+    use tempfile::tempdir;
+
+    use crate::room::Room;
+
+    /// Documented probe for `Timeline` drop on a non-tokio thread.
+    ///
+    /// Unlike Client / Room / SyncService / RoomListService, `Timeline` is
+    /// **not** empirically vulnerable to the cleanup-race the
+    /// `AsyncRuntimeDropped` wrapper protects against. `Timeline.drop_handle`
+    /// holds five `BackgroundTaskHandle`s; each aborts a tokio task on drop,
+    /// and those tasks capture `Arc<Client>` (e.g.
+    /// `room_event_cache_updates_task` spawned in
+    /// `matrix_sdk_ui::timeline::TimelineBuilder::build`). When `Timeline`
+    /// drops on a non-tokio thread the task-abort signal fires synchronously
+    /// but the captured `Arc<Client>` is released *on a tokio worker thread*
+    /// as the task winds down, so the sqlite/deadpool drop cascade never
+    /// executes on the non-tokio thread that dropped `Timeline`. The
+    /// cleanup-race other FFI types are vulnerable to is already mitigated
+    /// by Timeline's own task-cancellation machinery, so this test can't
+    /// trigger SIGABRT without artificially defeating that machinery first.
+    ///
+    /// Kept (ignored) as documentation in case a future refactor changes
+    /// the task lifecycle and re-opens the cleanup-race for `Timeline`.
+    /// PR #6545's body flagged `Timeline` as "the next strongest candidate"
+    /// based on static `Arc<ClientInner>` reachability, but missed the
+    /// runtime mitigation via `drop_handle`.
+    #[ignore = "Timeline.drop_handle already routes the cascade to tokio; \
+                see doc comment above"]
+    #[tokio::test]
+    async fn timeline_drop_on_non_tokio_thread_does_not_panic() {
+        let server = MatrixMockServer::new().await;
+        let dir = tempdir().unwrap();
+
+        let client = server
+            .client_builder()
+            .on_builder(|b| b.sqlite_store(dir.path(), None))
+            .build()
+            .await;
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let room_id = room_id!("!test:example.com");
+        let sdk_room = server.sync_joined_room(&client, room_id).await;
+        let ffi_room = Room::new(sdk_room, None);
+        let timeline = ffi_room.timeline().await.unwrap();
+
+        // Drop all other holders so `timeline` is the sole
+        // `Arc<ClientInner>` holder.
+        drop(client);
+        drop(ffi_room);
+
+        std::thread::spawn(move || drop(timeline))
+            .join()
+            .expect("Timeline::drop panicked on a non-tokio thread");
+    }
+}
