@@ -2309,7 +2309,7 @@ impl From<NotificationProcessSetup> for MatrixNotificationProcessSetup {
             }
             NotificationProcessSetup::SingleProcess { sync_service } => {
                 MatrixNotificationProcessSetup::SingleProcess {
-                    sync_service: sync_service.inner.clone(),
+                    sync_service: (*sync_service.inner).clone(),
                 }
             }
         }

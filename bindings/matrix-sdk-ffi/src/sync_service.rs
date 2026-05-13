@@ -27,7 +27,7 @@ use matrix_sdk_ui::{
 
 use crate::{
     TaskHandle, error::ClientError, helpers::unwrap_or_clone_arc, room_list::RoomListService,
-    runtime::get_runtime_handle,
+    runtime::get_runtime_handle, utils::AsyncRuntimeDropped,
 };
 
 #[derive(uniffi::Enum)]
@@ -58,7 +58,7 @@ pub trait SyncServiceStateObserver: SendOutsideWasm + SyncOutsideWasm + Debug {
 
 #[derive(uniffi::Object)]
 pub struct SyncService {
-    pub(crate) inner: Arc<MatrixSyncService>,
+    pub(crate) inner: AsyncRuntimeDropped<Arc<MatrixSyncService>>,
     utd_hook: Option<Arc<UtdHookManager>>,
 }
 
@@ -153,7 +153,7 @@ impl SyncServiceBuilder {
     pub async fn finish(self: Arc<Self>) -> Result<Arc<SyncService>, ClientError> {
         let this = unwrap_or_clone_arc(self);
         Ok(Arc::new(SyncService {
-            inner: Arc::new(this.builder.build().await?),
+            inner: AsyncRuntimeDropped::new(Arc::new(this.builder.build().await?)),
             utd_hook: this.utd_hook,
         }))
     }
