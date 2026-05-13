@@ -41,6 +41,7 @@ use crate::{
     TaskHandle,
     room::{Membership, Room},
     runtime::get_runtime_handle,
+    utils::AsyncRuntimeDropped,
 };
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -85,7 +86,7 @@ impl From<ruma::IdParseError> for RoomListError {
 
 #[derive(uniffi::Object)]
 pub struct RoomListService {
-    pub(crate) inner: Arc<matrix_sdk_ui::RoomListService>,
+    pub(crate) inner: AsyncRuntimeDropped<Arc<matrix_sdk_ui::RoomListService>>,
     pub(crate) utd_hook: Option<Arc<UtdHookManager>>,
 }
 

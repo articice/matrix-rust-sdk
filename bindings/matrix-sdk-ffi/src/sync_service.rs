@@ -66,7 +66,7 @@ pub struct SyncService {
 impl SyncService {
     pub fn room_list_service(&self) -> Arc<RoomListService> {
         Arc::new(RoomListService {
-            inner: self.inner.room_list_service(),
+            inner: AsyncRuntimeDropped::new(self.inner.room_list_service()),
             utd_hook: self.utd_hook.clone(),
         })
     }
