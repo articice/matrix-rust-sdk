@@ -113,7 +113,9 @@ impl RoomListService {
     async fn all_rooms(self: Arc<Self>) -> Result<Arc<RoomList>, RoomListError> {
         Ok(Arc::new(RoomList {
             room_list_service: self.clone(),
-            inner: Arc::new(self.inner.all_rooms().await.map_err(RoomListError::from)?),
+            inner: AsyncRuntimeDropped::new(Arc::new(
+                self.inner.all_rooms().await.map_err(RoomListError::from)?,
+            )),
         }))
     }
 
@@ -156,7 +158,7 @@ impl RoomListService {
 #[derive(uniffi::Object)]
 pub struct RoomList {
     room_list_service: Arc<RoomListService>,
-    inner: Arc<matrix_sdk_ui::room_list_service::RoomList>,
+    inner: AsyncRuntimeDropped<Arc<matrix_sdk_ui::room_list_service::RoomList>>,
 }
 
 #[matrix_sdk_ffi_macros::export]
@@ -629,5 +631,45 @@ mod tests {
         std::thread::spawn(move || drop(room_list_service))
             .join()
             .expect("RoomListService::drop panicked on a non-tokio thread");
+    }
+
+    /// Dropping an FFI [`RoomList`] on a non-tokio thread must not panic.
+    ///
+    /// Regression test for `RoomList.inner` being wrapped in [`AsyncRuntimeDropped`]. The per-list
+    /// `matrix_sdk_ui::room_list_service::RoomList` (from `RoomListService::all_rooms`) holds an
+    /// `Arc<ClientInner>` transitively; if its FFI wrapper is freed on a non-tokio thread as the
+    /// last holder, the sqlite Drop chain calls `tokio::task::spawn_blocking` outside a runtime
+    /// → SIGABRT. The sibling `room_list_service` field was already safe (its own inner is wrapped);
+    /// `inner` was the field still missing the wrap.
+    ///
+    /// Empirically observed on Android (2026-06-24): teardown freed the JS-side `RoomList`
+    /// (`uniffi_matrix_sdk_ffi_fn_free_roomlist`) as the last `Arc<ClientInner>` holder.
+    #[tokio::test]
+    async fn room_list_drop_on_non_tokio_thread_does_not_panic() {
+        let server = MatrixMockServer::new().await;
+        let dir = tempdir().unwrap();
+
+        let sdk_client = server
+            .client_builder()
+            .on_builder(|b| b.sqlite_store(dir.path(), None))
+            .build()
+            .await;
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let sync_service =
+            SyncServiceBuilder::new(sdk_client.clone(), None).finish().await.unwrap();
+        let room_list_service = sync_service.room_list_service();
+        let room_list = room_list_service.clone().all_rooms().await.unwrap();
+
+        // Drop every other holder so the worker thread's `drop(room_list)` runs the last
+        // `Arc<ClientInner>` cascade — through `room_list.inner` (the field under test).
+        drop(sdk_client);
+        drop(sync_service);
+        drop(room_list_service);
+
+        std::thread::spawn(move || drop(room_list))
+            .join()
+            .expect("RoomList::drop panicked on a non-tokio thread");
     }
 }
